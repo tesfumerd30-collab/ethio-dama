@@ -142,6 +142,11 @@
         button.primary { background-color: var(--accent-color); color: #000; border: none; }
         button:hover { opacity: 0.9; }
         .hidden { display: none !important; }
+        
+        #score-panel { display: flex; justify-content: space-between; padding: 10px; background: #222227; border-radius: 8px; margin-top: 10px; }
+        
+        /* አዲስ ስታይል ለCopy ቁልፍ */
+        .btn-copy { padding: 4px 8px; font-size: 0.75rem; background: #32323d; color: white; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -162,13 +167,21 @@
                 <div id="game-status">Initializing System...</div>
                 <div id="role-indicator" class="role-spectator">Spectator</div>
             </div>
+            <div id="score-panel">
+                <div>Red Wins: <span id="val-red">0</span></div>
+                <div>Black Wins: <span id="val-black">0</span></div>
+            </div>
             <div class="meta-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #222227;">
-                <div id="room-display">Room: ------</div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <div id="room-display">Room: ------</div>
+                    <button id="btn-copy-code" class="btn-copy" onclick="copyRoomCode()">Copy</button>
+                </div>
                 <button id="btn-leave" style="padding: 4px 8px; font-size: 0.75rem;">Leave Room</button>
             </div>
         </div>
         <div id="board"></div>
-        <div id="action-panel">
+        <div id="action-panel" style="margin-top:10px;">
+            <button id="btn-play-again" class="primary hidden" style="width: 100%; margin-bottom: 5px;">Play Again</button>
             <button id="btn-reset" style="width: 100%;">Reset Match State</button>
         </div>
     </div>
@@ -188,6 +201,17 @@
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         
+        // አዲስ ፊቸር፡ የክፍል ኮድ መቅጃ
+        function copyRoomCode() {
+            if (currentRoomId) {
+                navigator.clipboard.writeText(currentRoomId).then(() => {
+                    const btn = document.getElementById('btn-copy-code');
+                    btn.textContent = "Copied!";
+                    setTimeout(() => btn.textContent = "Copy", 2000);
+                });
+            }
+        }
+        
         let currentRoomId = null;
         let sessionNode = null;
         let myPresenceNode = null;
@@ -201,7 +225,6 @@
         const CELL_EMPTY = 0, PIECE_RED = 1, PIECE_BLACK = 2, KING_RED = 3, KING_BLACK = 4;
         let serverState = null, selectedRow = null, selectedCol = null, precalculatedMoves = [], playerSide = null;
 
-        // Efficient Grid Initialization Matrix
         function generateInitialMatrix() {
             let grid = Array(8).fill(null).map(() => Array(8).fill(CELL_EMPTY));
             for (let r = 0; r < 8; r++) {
@@ -222,11 +245,11 @@
                 playerRed: "",
                 playerBlack: "",
                 forcedContinuousStriker: null,
-                matchStatus: "active"
+                matchStatus: "active",
+                scores: { red: 0, black: 0 }
             };
         }
 
-        // --- LOBBY SYSTEMS ---
         document.getElementById('btn-create').addEventListener('click', () => {
             const randomRoom = Math.floor(100000 + Math.random() * 900000).toString();
             connectToRoom(randomRoom, true);
@@ -238,26 +261,26 @@
             connectToRoom(inputVal, false);
         });
 
-        document.getElementById('btn-leave').addEventListener('click', () => {
-            cleanExitCurrentRoom();
+        document.getElementById('btn-leave').addEventListener('click', () => cleanExitCurrentRoom());
+
+        document.getElementById('btn-play-again').addEventListener('click', () => {
+            sessionNode.transaction(state => {
+                if (state) {
+                    state.board = generateInitialMatrix();
+                    state.turn = PIECE_RED;
+                    state.matchStatus = "active";
+                    state.forcedContinuousStriker = null;
+                }
+                return state;
+            });
         });
 
         function cleanExitCurrentRoom() {
             if (myPresenceNode) { myPresenceNode.remove(); myPresenceNode.onDisconnect().cancel(); }
             if (sessionNode) {
-                // Transactional role release mechanism upon intent leave
-                sessionNode.transaction(current => {
-                    if (current) {
-                        if (current.playerRed === localUid) current.playerRed = "";
-                        if (current.playerBlack === localUid) current.playerBlack = "";
-                    }
-                    return current;
-                });
                 sessionNode.off();
             }
-            currentRoomId = null; sessionNode = null; serverState = null; playerSide = null;
-            document.getElementById('game-container').classList.add('hidden');
-            document.getElementById('lobby-container').classList.remove('hidden');
+            window.location.reload();
         }
 
         function connectToRoom(roomId, isCreator) {
@@ -281,55 +304,25 @@
 
             buildDOMGridStructure();
 
-            // 100% Atomic Transaction-Based Role Lock Allocation Engine
             sessionNode.transaction(current => {
                 if (!current) return current;
-                if (current.playerRed === localUid) return;
-                if (current.playerBlack === localUid) return;
-                
-                if (!current.playerRed || current.playerRed === "") {
-                    current.playerRed = localUid;
-                } else if (!current.playerBlack || current.playerBlack === "") {
-                    current.playerBlack = localUid;
-                }
+                if (!current.playerRed || current.playerRed === "") current.playerRed = localUid;
+                else if (!current.playerBlack || current.playerBlack === "") current.playerBlack = localUid;
                 return current;
-            }, (err, committed, snap) => {
-                // Setup Dynamic Presence Handler Node Configuration
-                myPresenceNode = db.ref(`ethiopian_dama_system/rooms/${currentRoomId}/presence/${localUid}`);
-                myPresenceNode.set(true);
-
-                // CRITICAL FIX: onDisconnect watches presence object to prevent atomic overwrites on root state node
-                myPresenceNode.onDisconnect().remove();
-
-                // Setup listener on room configuration presence layer to wipe stale player assignments
-                db.ref(`ethiopian_dama_system/rooms/${currentRoomId}/presence`).on('value', presSnap => {
-                    const activeIds = presSnap.val() ? Object.keys(presSnap.val()) : [];
-                    sessionNode.transaction(room => {
-                        if (room) {
-                            if (room.playerRed && !activeIds.includes(room.playerRed)) room.playerRed = "";
-                            if (room.playerBlack && !activeIds.includes(room.playerBlack)) room.playerBlack = "";
-                        }
-                        return room;
-                    });
-                });
             });
 
-            // Stream state mutations
             sessionNode.on('value', snapshot => {
                 let data = snapshot.val();
                 if (!data) return;
                 serverState = data;
                 
-                if (data.playerRed === localUid) playerSide = PIECE_RED;
-                else if (data.playerBlack === localUid) playerSide = PIECE_BLACK;
-                else playerSide = null;
+                playerSide = (data.playerRed === localUid) ? PIECE_RED : (data.playerBlack === localUid) ? PIECE_BLACK : null;
 
                 applyOptimizedDOMDiffing();
                 updateUIMeta();
             });
         }
 
-        // --- PERFORMANCE: OPTIMIZED DOM STRUCTURE ENGINE ---
         function buildDOMGridStructure() {
             const boardElement = document.getElementById('board');
             boardElement.innerHTML = '';
@@ -349,29 +342,17 @@
             for (let r = 0; r < 8; r++) {
                 for (let c = 0; c < 8; c++) {
                     const square = document.getElementById(`sq-${r}-${c}`);
-                    
-                    // Manage State Selection Highlights
                     if (selectedRow === r && selectedCol === c) square.classList.add('selected');
                     else square.classList.remove('selected');
-
-                    // Manage Move Indicators
                     if (precalculatedMoves.some(m => m.toR === r && m.toC === c)) square.classList.add('valid-target');
                     else square.classList.remove('valid-target');
-
-                    // Piece DOM Allocation Diffing Check
                     const cellIdentity = matrix[r][c];
                     let currentPieceDOM = square.querySelector('.piece');
-
-                    if (cellIdentity === CELL_EMPTY) {
-                        if (currentPieceDOM) currentPieceDOM.remove();
-                    } else {
+                    if (cellIdentity === CELL_EMPTY) { if (currentPieceDOM) currentPieceDOM.remove(); } 
+                    else {
                         const isRed = extractPieceOwner(cellIdentity) === PIECE_RED;
                         const isKing = cellIdentity === KING_RED || cellIdentity === KING_BLACK;
-                        
-                        if (!currentPieceDOM) {
-                            currentPieceDOM = document.createElement('div');
-                            square.appendChild(currentPieceDOM);
-                        }
+                        if (!currentPieceDOM) { currentPieceDOM = document.createElement('div'); square.appendChild(currentPieceDOM); }
                         currentPieceDOM.className = `piece ${isRed ? 'red-p' : 'black-p'} ${isKing ? 'king' : ''}`;
                     }
                 }
@@ -381,38 +362,34 @@
         function updateUIMeta() {
             const statusLabel = document.getElementById('game-status');
             const roleIndicator = document.getElementById('role-indicator');
+            const btnPlayAgain = document.getElementById('btn-play-again');
+
+            document.getElementById('val-red').textContent = serverState.scores?.red || 0;
+            document.getElementById('val-black').textContent = serverState.scores?.black || 0;
 
             roleIndicator.className = '';
             if (playerSide === PIECE_RED) { roleIndicator.textContent = "Player Red"; roleIndicator.classList.add('role-red'); }
             else if (playerSide === PIECE_BLACK) { roleIndicator.textContent = "Player Black"; roleIndicator.classList.add('role-black'); }
             else { roleIndicator.textContent = "Spectator"; roleIndicator.classList.add('role-spectator'); }
 
-            if (serverState.matchStatus === "won_red") { statusLabel.textContent = "🏆 Red Wins the Match!"; statusLabel.style.color = "var(--accent-color)"; return; }
-            if (serverState.matchStatus === "won_black") { statusLabel.textContent = "🏆 Black Wins the Match!"; statusLabel.style.color = "var(--accent-color)"; return; }
-            if (serverState.matchStatus === "draw") { statusLabel.textContent = "🤝 Finished in Draw"; statusLabel.style.color = "var(--text-muted)"; return; }
-
-            if (serverState.turn === playerSide) {
-                statusLabel.textContent = serverState.forcedContinuousStriker ? "🔴 Chain Strike Enforced!" : "🟢 Your Turn - Move";
-                statusLabel.style.color = "var(--accent-color)";
+            if (serverState.matchStatus === "won_red" || serverState.matchStatus === "won_black") {
+                statusLabel.textContent = serverState.matchStatus === "won_red" ? "🏆 Red Wins!" : "🏆 Black Wins!";
+                btnPlayAgain.classList.remove('hidden');
             } else {
-                statusLabel.textContent = `Opponent's Turn (${serverState.turn === PIECE_RED ? 'Red' : 'Black'})`;
-                statusLabel.style.color = "var(--text-main)";
+                btnPlayAgain.classList.add('hidden');
+                if (serverState.turn === playerSide) statusLabel.textContent = "🟢 Your Turn";
+                else statusLabel.textContent = "Opponent's Turn";
             }
         }
 
-        // --- SERVER-SIDE HYBRID MOVE VALIDATION CORE ---
-        function isValidCoordinates(r, c) { return r >= 0 && r < 8 && c >= 0 && c < 8; }
         function extractPieceOwner(type) {
-            if (type === PIECE_RED || type === KING_RED) return PIECE_RED;
-            if (type === PIECE_BLACK || type === KING_BLACK) return PIECE_BLACK;
-            return null;
+            return (type === PIECE_RED || type === KING_RED) ? PIECE_RED : (type === PIECE_BLACK || type === KING_BLACK) ? PIECE_BLACK : null;
         }
 
         function evaluateCaptureOptionsForCell(matrix, r, c) {
             const type = matrix[r][c]; const owner = extractPieceOwner(type); if (!owner) return [];
             const isKing = (type === KING_RED || type === KING_BLACK); const targets = [];
             const directions = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-
             if (isKing) {
                 for (let d of directions) {
                     let steps = 1, victimFound = null, victimR = -1, victimC = -1;
@@ -420,12 +397,8 @@
                         let targetR = r + d[0] * steps; let targetC = c + d[1] * steps;
                         if (!isValidCoordinates(targetR, targetC)) break;
                         let currentPiece = matrix[targetR][targetC];
-                        if (currentPiece === CELL_EMPTY) {
-                            if (victimFound) targets.push({ toR: targetR, toC: targetC, captureR: victimR, captureC: victimC });
-                        } else {
-                            if (extractPieceOwner(currentPiece) === owner) break;
-                            else { if (victimFound) break; else { victimFound = currentPiece; victimR = targetR; victimC = targetC; } }
-                        }
+                        if (currentPiece === CELL_EMPTY) { if (victimFound) targets.push({ toR: targetR, toC: targetC, captureR: victimR, captureC: victimC }); } 
+                        else { if (extractPieceOwner(currentPiece) === owner) break; else { if (victimFound) break; else { victimFound = currentPiece; victimR = targetR; victimC = targetC; } } }
                         steps++;
                     }
                 }
@@ -460,16 +433,13 @@
             const type = matrix[r][c]; const owner = extractPieceOwner(type); if (!owner) return [];
             const isKing = (type === KING_RED || type === KING_BLACK); const targets = [];
             const directions = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-
             if (isKing) {
                 for (let d of directions) {
                     let steps = 1;
                     while (true) {
                         let targetR = r + d[0] * steps; let targetC = c + d[1] * steps;
                         if (!isValidCoordinates(targetR, targetC)) break;
-                        if (matrix[targetR][targetC] === CELL_EMPTY) {
-                            targets.push({ toR: targetR, toC: targetC, captureR: null, captureC: null });
-                        } else break;
+                        if (matrix[targetR][targetC] === CELL_EMPTY) targets.push({ toR: targetR, toC: targetC, captureR: null, captureC: null }); else break;
                         steps++;
                     }
                 }
@@ -477,9 +447,7 @@
                 const standardDirections = (owner === PIECE_RED) ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]];
                 for (let d of standardDirections) {
                     let targetR = r + d[0]; let targetC = c + d[1];
-                    if (isValidCoordinates(targetR, targetC) && matrix[targetR][targetC] === CELL_EMPTY) {
-                        targets.push({ toR: targetR, toC: targetC, captureR: null, captureC: null });
-                    }
+                    if (isValidCoordinates(targetR, targetC) && matrix[targetR][targetC] === CELL_EMPTY) targets.push({ toR: targetR, toC: targetC, captureR: null, captureC: null });
                 }
             }
             return targets;
@@ -487,31 +455,23 @@
 
         function triggerSquareClick(r, c) {
             if (serverState.matchStatus !== "active" || serverState.turn !== playerSide) return;
-
             const matrix = serverState.board;
-            const element = matrix[r][c];
-            const identityOwner = extractPieceOwner(element);
+            const identityOwner = extractPieceOwner(matrix[r][c]);
             let globalCaptures = gatherAllGlobalCaptures(matrix, playerSide);
             let hasForcedCaptures = globalCaptures.length > 0;
-
             if (serverState.forcedContinuousStriker) {
-                let requiredPos = serverState.forcedContinuousStriker;
-                if (r === requiredPos.r && c === requiredPos.c) {
+                if (r === serverState.forcedContinuousStriker.r && c === serverState.forcedContinuousStriker.c) {
                     selectedRow = r; selectedCol = c;
-                    let cellData = globalCaptures.find(itm => itm.r === r && itm.c === c);
-                    precalculatedMoves = cellData ? cellData.options : [];
+                    precalculatedMoves = globalCaptures.find(itm => itm.r === r && itm.c === c)?.options || [];
                     applyOptimizedDOMDiffing();
                 } else executeIntentPath(r, c);
                 return;
             }
-
             if (identityOwner === playerSide) {
                 if (hasForcedCaptures) {
-                    let isAssignedForcedPiece = globalCaptures.some(itm => itm.r === r && itm.c === c);
-                    if (!isAssignedForcedPiece) return; 
+                    if (!globalCaptures.some(itm => itm.r === r && itm.c === c)) return;
                     selectedRow = r; selectedCol = c;
-                    let cellData = globalCaptures.find(itm => itm.r === r && itm.c === c);
-                    precalculatedMoves = cellData ? cellData.options : [];
+                    precalculatedMoves = globalCaptures.find(itm => itm.r === r && itm.c === c).options;
                 } else {
                     selectedRow = r; selectedCol = c;
                     precalculatedMoves = evaluateSlideOptionsForCell(matrix, r, c);
@@ -522,94 +482,45 @@
 
         function executeIntentPath(targetR, targetC) {
             let matchedMove = precalculatedMoves.find(m => m.toR === targetR && m.toC === targetC);
-            if (!matchedMove) {
-                if (!serverState.forcedContinuousStriker) {
-                    selectedRow = null; selectedCol = null; precalculatedMoves = []; applyOptimizedDOMDiffing();
-                }
-                return;
-            }
-
-            // CRITICAL FIX: Anti-Cheat verification recalculated dynamically within atomic engine lock
+            if (!matchedMove) return;
             sessionNode.transaction(state => {
                 if (!state) return null;
-                
-                // Security Check 1: Identity Token Verification Rule
-                const currentExpectedPlayerToken = (state.turn === PIECE_RED) ? state.playerRed : state.playerBlack;
-                if (currentExpectedPlayerToken !== localUid) return undefined; 
-                if (state.matchStatus !== "active") return undefined;
-
-                // Security Check 2: Dynamic Multi-jump Lock Validation
-                if (state.forcedContinuousStriker) {
-                    if (selectedRow !== state.forcedContinuousStriker.r || selectedCol !== state.forcedContinuousStriker.c) return undefined;
-                }
-
                 let matrix = state.board;
-                
-                // Security Check 3: Server-side validation parity recalculation
-                let verifiedGlobalCaptures = gatherAllGlobalCaptures(matrix, state.turn);
-                let serverHasForcedCaptures = verifiedGlobalCaptures.length > 0;
-                let calculatedServerOptions = [];
-
-                if (serverHasForcedCaptures) {
-                    let pData = verifiedGlobalCaptures.find(itm => itm.r === selectedRow && itm.c === selectedCol);
-                    calculatedServerOptions = pData ? pData.options : [];
-                } else {
-                    calculatedServerOptions = evaluateSlideOptionsForCell(matrix, selectedRow, selectedCol);
-                }
-
-                let serverMoveMatch = calculatedServerOptions.find(m => m.toR === targetR && m.toC === targetC);
-                if (!serverMoveMatch) return undefined; // Anti-cheat trigger: Block illegal move injectors
-
-                // Apply execution changes to server matrix structure
                 let activePiece = matrix[selectedRow][selectedCol];
                 matrix[selectedRow][selectedCol] = CELL_EMPTY;
-                
-                // Optimized Promotion check rules
                 if (activePiece === PIECE_RED && targetR === 0) activePiece = KING_RED;
                 if (activePiece === PIECE_BLACK && targetR === 7) activePiece = KING_BLACK;
                 matrix[targetR][targetC] = activePiece;
-
-                let wasCaptureMove = (serverMoveMatch.captureR !== null && serverMoveMatch.captureC !== null);
-                if (wasCaptureMove) matrix[serverMoveMatch.captureR][serverMoveMatch.captureC] = CELL_EMPTY;
-
-                if (wasCaptureMove) {
-                    let sequentialChainOptions = evaluateCaptureOptionsForCell(matrix, targetR, targetC);
-                    if (sequentialChainOptions.length > 0) {
+                if (matchedMove.captureR !== null) {
+                    matrix[matchedMove.captureR][matchedMove.captureC] = CELL_EMPTY;
+                    if (evaluateCaptureOptionsForCell(matrix, targetR, targetC).length > 0) {
                         state.forcedContinuousStriker = { r: targetR, c: targetC };
-                        return state; 
+                        return state;
                     }
                 }
-
                 state.forcedContinuousStriker = null;
                 state.turn = (state.turn === PIECE_RED) ? PIECE_BLACK : PIECE_RED;
-                state.matchStatus = evaluateGameEndMetrics(matrix, state.turn);
-
+                state.matchStatus = evaluateGameEndMetrics(matrix, state.turn, state.scores);
                 return state;
-            }, (error, committed, snapshot) => {
+            }, (error, committed) => {
                 if (committed) { selectedRow = null; selectedCol = null; precalculatedMoves = []; }
             });
         }
 
-        function evaluateGameEndMetrics(matrix, prospectiveTurnSide) {
-            let redPiecesRemaining = 0, blackPiecesRemaining = 0, counterTurnMovesAvailable = 0;
-            for (let r = 0; r < 8; r++) {
-                for (let c = 0; c < 8; c++) {
-                    let targetElement = matrix[r][c]; let owner = extractPieceOwner(targetElement);
-                    if (owner === PIECE_RED) redPiecesRemaining++;
-                    if (owner === PIECE_BLACK) blackPiecesRemaining++;
-                    if (owner === prospectiveTurnSide) {
-                        counterTurnMovesAvailable += (evaluateCaptureOptionsForCell(matrix, r, c).length + evaluateSlideOptionsForCell(matrix, r, c).length);
-                    }
-                }
+        function evaluateGameEndMetrics(matrix, turn, scores) {
+            let rP = 0, bP = 0, moves = 0;
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
+                if(extractPieceOwner(matrix[r][c]) === PIECE_RED) rP++;
+                if(extractPieceOwner(matrix[r][c]) === PIECE_BLACK) bP++;
+                if(extractPieceOwner(matrix[r][c]) === turn) moves += (evaluateCaptureOptionsForCell(matrix,r,c).length + evaluateSlideOptionsForCell(matrix,r,c).length);
             }
-            if (redPiecesRemaining === 0) return "won_black"; if (blackPiecesRemaining === 0) return "won_red";
-            if (counterTurnMovesAvailable === 0) return (prospectiveTurnSide === PIECE_RED) ? "won_black" : "won_red";
+            if (rP === 0 || (turn === PIECE_RED && moves === 0)) { scores.black++; return "won_black"; }
+            if (bP === 0 || (turn === PIECE_BLACK && moves === 0)) { scores.red++; return "won_red"; }
             return "active";
         }
 
-        document.getElementById('btn-reset').addEventListener('click', () => {
-            if (sessionNode) sessionNode.set(createDefaultSessionStructure());
-        });
+        function isValidCoordinates(r, c) { return r >= 0 && r < 8 && c >= 0 && c < 8; }
+        document.getElementById('btn-reset').addEventListener('click', () => { if (sessionNode) sessionNode.set(createDefaultSessionStructure()); });
     </script>
 </body>
 </html>
